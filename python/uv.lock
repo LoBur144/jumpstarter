@@ -42,6 +42,7 @@ members = [
     "jumpstarter-driver-qemu",
     "jumpstarter-driver-renode",
     "jumpstarter-driver-ridesx",
+    "jumpstarter-driver-sdmux",
     "jumpstarter-driver-sdwire",
     "jumpstarter-driver-shell",
     "jumpstarter-driver-snmp",
@@ -3088,6 +3089,17 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.0.0" },
     { name = "pytest-cov", specifier = ">=6.0.0" },
 ]
+
+[[package]]
+name = "jumpstarter-driver-sdmux"
+version = "0.1.2"
+source = { editable = "packages/jumpstarter-driver-sdmux" }
+dependencies = [
+    { name = "jumpstarter" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "jumpstarter", editable = "packages/jumpstarter" }]
 
 [[package]]
 name = "jumpstarter-driver-sdwire"
