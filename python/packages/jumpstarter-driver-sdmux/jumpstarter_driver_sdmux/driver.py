@@ -1,7 +1,10 @@
+from jumpstarter.driver import Driver, export 
 from pathlib import Path
 import time
-from jumpstarter.driver import Driver, export 
-import subprocess
+import ctypes
+import os
+
+libc = ctypes.CDLL("libc.so.6")
 
 class UsbSdMux(Driver):
     sg_device: str | None = None
@@ -40,9 +43,26 @@ class UsbSdMux(Driver):
 
         raise RuntimeError("No USB-SD-Mux reader device found")
 
+    def wait_for_sd_device(self, timeout=5):
+        start = time.time()
+
+        existing_devices = set(Path("/dev").glob("sd?"))
+
+        while time.time() - start < timeout:
+            current_device = set(Path("/dev").glob("sd?"))
+
+            new_devices = current_device - existing_devices
+            if new_devices:
+                print(f"Detected new SD device: {new_devices}")
+                return True
+
+        raise RuntimeError("SD device not found")
+
+
     def search_sd_card(self):
-        self.switch_host()
-        time.sleep(2)
+        if self.sdmux_status().strip() != "host":
+            self.switch_host()
+            self.wait_for_sd_device()
 
         print("Searching for SD-Card...")
 
@@ -69,25 +89,80 @@ class UsbSdMux(Driver):
 
                     mount_point = Path.home() / "sdmux"
                     mount_point.mkdir(parents=True, exist_ok=True)
-                    mounts = subprocess.run(["mount"], capture_output=True, text=True).stdout
+                    with open("/proc/self/mounts") as f:
+                        mounts = f.read()
 
-                    if sd_device in mounts:
+                    if mount_point.as_posix() in mounts:
                         print(f"{sd_device} already mounted")
                         return str(mount_point)
 
                     print(f"Mounting {sd_device} to {mount_point}")
 
-                    result = subprocess.run(["sudo", "mount", final_partition, str(mount_point)],capture_output=True,text=True,)
+                    result = libc.mount(
+                        final_partition.encode(),
+                        str(mount_point).encode(),
+                        b"auto",
+                        0,
+                        None
+                    )
 
-                    if result.returncode != 0:
-                        print("Mount failed:")
-                        print(result.stderr)
-                        return sd_device
+                    if result != 0:
+                        raise RuntimeError("mount failed")
 
                     print("Mount successful")
                     return str(mount_point)
         raise RuntimeError("No SD card found")
+    
+    @export
+    def read(self, filepath):
+        print("Read file from SD card")
 
+        mount_point = self.search_sd_card()
+
+        full_path = Path(mount_point) / filepath
+
+        if not full_path.exists():
+            raise RuntimeError(f"File not found: {full_path}")
+
+        print(f"Reading file: {full_path}")
+
+        with open(full_path, "r") as f:
+            return f.read()
+
+    @export
+    def write(self, image_file):
+        print("Writing image to SD card")
+
+        if self.sdmux_status().strip() != "host":
+            self.switch_host()
+            self.wait_for_sd_device()
+
+        sd_card = self.search_sd_card()
+
+        print(f"Using device: {sd_card}")
+
+        print("Unmounting SD before write")
+        libc.umount(str(Path.home() / "sdmux").encode())
+
+        print(f"Flashing {image_file} to {sd_card}")
+
+        try:
+            with open(image_file, "rb") as src, open(sd_card, "wb") as dstination:
+                while True:
+                    chunk = src.read(4 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    dstination.write(chunk)
+
+            os.sync()
+
+        except Exception as error:
+            raise RuntimeError(f"write failed: {error}")
+
+        os.sync()
+
+        print("Write complete")
+        return sd_card
 
     def run_usbsdmux(self, mode):
         if not self.sg_device:
@@ -95,18 +170,17 @@ class UsbSdMux(Driver):
 
         print(f"Running: usbsdmux {self.sg_device} {mode}")
 
-        result = subprocess.run(
-            ["usbsdmux", self.sg_device, mode],
-            capture_output=True,
-            text=True,
-        )
 
-        if result.returncode != 0:
-            print(result.stderr)
+        cmd = f"usbsdmux {self.sg_device} {mode}"
+        stream = os.popen(cmd)
+
+        output = stream.read()
+        result = stream.close()
+
+        if result is not None:
             raise RuntimeError(f"usbsdmux failed: {mode}")
 
-        return result.stdout
-
+        return output
 
     @export
     def switch_host(self):
@@ -116,6 +190,7 @@ class UsbSdMux(Driver):
     @export
     def switch_dut(self):
         print("switching sdmux to dut")
+        libc.umount(str(Path.home() / "sdmux").encode())
         return self.run_usbsdmux("dut")
     
     @export
@@ -133,63 +208,6 @@ class UsbSdMux(Driver):
         if not self.sg_device:
             self.sg_device = self.search_sg_device()
         return self.sg_device
-    
-    @export
-    def read(self, filepath):
-        print("Read file from SD card")
-
-        mount_point = self.search_sd_card()
-
-        full_path = Path(mount_point) / filepath
-
-        if not full_path.exists():
-            raise RuntimeError(f"File not found: {full_path}")
-
-        print(f"Reading file: {full_path}")
-
-        with open(full_path, "rb") as f:
-            return f.read()
-
-    @export
-    def write(self, image_file):
-        print("Writing image to SD card")
-
-        self.switch_host()
-        time.sleep(2)
-
-        sd_device = self.search_sd_card()
-
-        print(f"Using device: {sd_device}")
-
-        print("Unmounting SD before write")
-        subprocess.run(
-            ["sudo", "umount", f"{sd_device}*"],
-            capture_output=True,
-            text=True,
-        )
-
-        print(f"Flashing {image_file} to {sd_device}")
-
-        result = subprocess.run(
-            [
-                "sudo",
-                "dd",
-                f"if={image_file}",
-                f"of={sd_device}",
-                "bs=4M",
-                "status=progress",
-                "conv=fsync",
-            ],
-            text=True,
-        )
-
-        if result.returncode != 0:
-            raise RuntimeError("write failed")
-
-        subprocess.run(["sync"])
-
-        print("Write complete")
-        return sd_device
 
     @classmethod
     def client(cls) -> str:
