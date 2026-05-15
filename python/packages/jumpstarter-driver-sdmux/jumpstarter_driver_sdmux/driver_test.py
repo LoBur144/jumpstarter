@@ -10,29 +10,31 @@ class TestUsbSdMux(unittest.TestCase):
     def setUp(self):
         self.driver = UsbSdMux()
 
+
     @patch("os.popen")
-    def test_run_usbsdmux_success(self, mock_popen):
+    @patch.object(UsbSdMux, "search_sg_device", return_value="/dev/sg0")
+    def test_run_usbsdmux_success(self, mock_search, mock_popen):
         mock_stream = MagicMock()
         mock_stream.read.return_value = "host"
         mock_stream.close.return_value = None
         mock_popen.return_value = mock_stream
 
-        self.driver.sg_device = "/dev/sg0"
-
         result = self.driver.run_usbsdmux("get")
         self.assertEqual(result, "host")
+        mock_search.assert_called_once()
 
     @patch("os.popen")
-    def test_run_usbsdmux_fail(self, mock_popen):
+    @patch.object(UsbSdMux, "search_sg_device", return_value="/dev/sg0")
+    def test_run_usbsdmux_fail(self, mock_search, mock_popen):
         mock_stream = MagicMock()
         mock_stream.read.return_value = ""
         mock_stream.close.return_value = 1
         mock_popen.return_value = mock_stream
 
-        self.driver.sg_device = "/dev/sg0"
-
         with self.assertRaises(RuntimeError):
             self.driver.run_usbsdmux("get")
+
+        mock_search.assert_called_once()
 
     @patch("pathlib.Path.glob")
     def test_wait_for_sd_device(self, mock_glob):
@@ -50,10 +52,10 @@ class TestUsbSdMux(unittest.TestCase):
         mock_search.return_value = "/tmp"
 
         test_file = Path("/tmp/test.txt")
-        test_file.write_text("hello")
+        test_file.write_text("test")
 
         result = self.driver.read("test.txt")
-        self.assertEqual(result, "hello")
+        self.assertEqual(result, "test")
 
         test_file.unlink()
 
@@ -62,7 +64,7 @@ class TestUsbSdMux(unittest.TestCase):
         mock_search.return_value = "/tmp"
 
         with self.assertRaises(RuntimeError):
-            self.driver.read("does_not_exist.txt")
+            self.driver.read("test.txt")
 
     @patch("os.sync")
     @patch("ctypes.CDLL")
@@ -87,6 +89,15 @@ class TestUsbSdMux(unittest.TestCase):
         image.unlink()
         Path("/tmp/test_device").unlink()
 
+    @patch("os.sync")
+    @patch.object(UsbSdMux, "search_sd_card")
+    @patch.object(UsbSdMux, "sdmux_status")
+    def test_write_fail(self, mock_status, mock_search, mock_sync):
+        mock_status.return_value = "host"
+        mock_search.return_value = "/tmp/test_device"
+
+        with self.assertRaises(RuntimeError):
+            self.driver.write("/non/existing/file.img")
 
 if __name__ == "__main__":
     unittest.main()

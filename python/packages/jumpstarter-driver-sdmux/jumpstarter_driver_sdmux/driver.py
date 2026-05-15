@@ -1,7 +1,8 @@
 from jumpstarter.driver import Driver, export 
 from pathlib import Path
-import time
+import subprocess
 import ctypes
+import time
 import os
 
 libc = ctypes.CDLL("libc.so.6")
@@ -138,7 +139,6 @@ class UsbSdMux(Driver):
             self.wait_for_sd_device()
 
         sd_card = self.search_sd_card()
-
         print(f"Using device: {sd_card}")
 
         print("Unmounting SD before write")
@@ -146,20 +146,20 @@ class UsbSdMux(Driver):
 
         print(f"Flashing {image_file} to {sd_card}")
 
-        try:
-            with open(image_file, "rb") as src, open(sd_card, "wb") as dstination:
-                while True:
-                    chunk = src.read(4 * 1024 * 1024)
-                    if not chunk:
-                        break
-                    dstination.write(chunk)
-
-            os.sync()
-
-        except Exception as error:
-            raise RuntimeError(f"write failed: {error}")
+        result = subprocess.run(
+                [
+                    "sudo",
+                    "dd",
+                    f"if={image_file}",
+                    f"of={sd_card}",
+                    "bs=4M",
+                ]
+            )
 
         os.sync()
+
+        if result.returncode != 0:
+            raise RuntimeError("Write failed")
 
         print("Write complete")
         return sd_card

@@ -1,4 +1,3 @@
-
 apiVersion: jumpstarter.dev/v1alpha1
 kind: ExporterConfig
 metadata:
@@ -9,3 +8,9 @@ export:
   storage:
     type: jumpstarter_driver_sdmux.driver.UsbSdMux
 
+  power:
+    type: jumpstarter_driver_gpiod.driver.DigitalOutput
+    config:
+      device: /dev/gpiochip0
+      line: 5
+      active_low: true
