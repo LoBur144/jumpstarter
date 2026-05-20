@@ -1,50 +1,54 @@
-from jumpstarter.driver import Driver, export 
+from __future__ import annotations
+
+from jumpstarter.driver import Driver, export
 from pathlib import Path
 import subprocess
 import ctypes
 import time
 import os
 
+# Gives direct access to libc for mount/umount syscalls
 libc = ctypes.CDLL("libc.so.6")
 
 class UsbSdMux(Driver):
+    """Driver for UsbSdMux device, used for automated SD-Card access"""
     sg_device: str | None = None
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        #self.serial = kwargs.get("serial")
-        #self.idVendor = kwargs.get("idVendor")
-        #self.idProduct = kwargs.get("idProduct")
         self.sg_device = None
-    
+
     def start(self):
-        print("UsbSdMux Startet")
+        """Called by the framework on startup"""
+        self.logger.info("Starting UsbSdMux driver")
         self.sg_device = self.search_sg_device()
 
     def search_sg_device(self):
-        VALID_DEVICES = {
+        """Locate the UsbSdMux via vendor/product ID and returns the corresponding /dev/sgX path"""
+        valid_devices = {
             ("0424", "2640"),
             ("0424", "4041"),
         }
 
         for sg in Path("/sys/class/scsi_generic").glob("sg*"):
             resolved = sg.resolve()
-            print(resolved)
+            self.logger.info(f"Checking {sg.name}: {resolved}")
 
             for parent in resolved.parents:
                 if (parent / "idVendor").exists():
                     vendor = (parent / "idVendor").read_text().strip()
                     product = (parent / "idProduct").read_text().strip()
 
-                    print(f"Checking {sg.name}: vendor={vendor}, product={product}")
+                    self.logger.info(f"Checking {sg.name}: vendor={vendor}, product={product}")
 
-                    if (vendor, product) in VALID_DEVICES:
-                        print(f"Found SDMux reader: /dev/{sg.name}")
+                    if (vendor, product) in valid_devices:
+                        self.logger.info(f"Found SDMux reader: /dev/{sg.name}")
                         return f"/dev/{sg.name}"
 
         raise RuntimeError("No USB-SD-Mux reader device found")
 
     def wait_for_sd_device(self, timeout=5):
+        """Waits until a new /dev/sdX device appears"""
         start = time.time()
 
         existing_devices = set(Path("/dev").glob("sd?"))
@@ -54,18 +58,19 @@ class UsbSdMux(Driver):
 
             new_devices = current_device - existing_devices
             if new_devices:
-                print(f"Detected new SD device: {new_devices}")
+                self.logger.info(f"Detected new SD device: {new_devices}")
                 return True
 
         raise RuntimeError("SD device not found")
 
 
     def search_sd_card(self):
-        if self.sdmux_status().strip() != "host":
+        """Locates the SD-Card block device e.g. /dev/sdX"""
+        if self._sdmux_status().strip() != "host":
             self.switch_host()
             self.wait_for_sd_device()
 
-        print("Searching for SD-Card...")
+        self.logger.info("Searching for SD-Card...")
 
         self.search_sg_device()
         sg_name = Path(self.sg_device).name
@@ -79,97 +84,80 @@ class UsbSdMux(Driver):
                 devices = list(block_path.glob("sd?"))
                 if devices:
                     sd_device = f"/dev/{devices[0].name}"
-                    print(f"Found SD device: {sd_device}")
-        
-                    disk = devices[0].name 
-                    partitions = list(Path("/sys/class/block").glob(f"{disk}[0-9]*"))
-                    if not partitions:
-                        raise RuntimeError("No partition found on sd card")
-                    
-                    final_partition = f"/dev/{partitions[0].name}"
+                    self.logger.info(f"Found SD device: {sd_device}")
+                    return sd_device
 
-                    mount_point = Path.home() / "sdmux"
-                    mount_point.mkdir(parents=True, exist_ok=True)
-                    with open("/proc/self/mounts") as f:
-                        mounts = f.read()
-
-                    if mount_point.as_posix() in mounts:
-                        print(f"{sd_device} already mounted")
-                        return str(mount_point)
-
-                    print(f"Mounting {sd_device} to {mount_point}")
-
-                    result = libc.mount(
-                        final_partition.encode(),
-                        str(mount_point).encode(),
-                        b"auto",
-                        0,
-                        None
-                    )
-
-                    if result != 0:
-                        raise RuntimeError("mount failed")
-
-                    print("Mount successful")
-                    return str(mount_point)
         raise RuntimeError("No SD card found")
-    
-    @export
-    def read(self, filepath):
-        print("Read file from SD card")
-
-        mount_point = self.search_sd_card()
-
-        full_path = Path(mount_point) / filepath
-
-        if not full_path.exists():
-            raise RuntimeError(f"File not found: {full_path}")
-
-        print(f"Reading file: {full_path}")
-
-        with open(full_path, "r") as f:
-            return f.read()
 
     @export
-    def write(self, image_file):
-        print("Writing image to SD card")
+    def read(self, output_file:str):
+        """Read the full SD card content and store it as an image file"""
+        self.logger.info("Reading image from SD card")
 
-        if self.sdmux_status().strip() != "host":
+        if self._sdmux_status().strip() != "host":
             self.switch_host()
             self.wait_for_sd_device()
 
         sd_card = self.search_sd_card()
-        print(f"Using device: {sd_card}")
+        self.logger.info(f"Using device: {sd_card}")
 
-        print("Unmounting SD before write")
+        if not sd_card.startswith("/dev/sd"):
+            raise RuntimeError("Invalid SD device")
+
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self.logger.info(f"Saving image to: {output_path}")
+
+        result = subprocess.run(["sudo","dd",f"if={sd_card}",f"of={output_file}","bs=16M", "iflag=direct", "oflag=direct", "status=progress"],)
+
+        os.sync()
+
+        if result.returncode != 0:
+            raise RuntimeError("Read failed")
+
+        self.logger.info("Read complete")
+        return str(output_path)
+
+
+
+    @export
+    def write(self, image_file):
+        """Flashes an image file on to the SD-Card using dd"""
+        self.logger.info("Writing image to SD card")
+
+        if self._sdmux_status().strip() != "host":
+            self.switch_host()
+            self.wait_for_sd_device()
+
+        sd_card = self.search_sd_card()
+        self.logger.info(f"Using device: {sd_card}")
+
+        self.logger.info("Unmounting SD before write")
         libc.umount(str(Path.home() / "sdmux").encode())
 
-        print(f"Flashing {image_file} to {sd_card}")
+        self.logger.info(f"Flashing {image_file} to {sd_card}")
 
-        result = subprocess.run(
-                [
-                    "sudo",
-                    "dd",
-                    f"if={image_file}",
-                    f"of={sd_card}",
-                    "bs=4M",
-                ]
-            )
+        result = subprocess.run(["sudo","dd",f"if={image_file}",f"of={sd_card}","bs=4M",],)
 
         os.sync()
 
         if result.returncode != 0:
             raise RuntimeError("Write failed")
 
-        print("Write complete")
+        self.logger.info("Write complete")
         return sd_card
 
+    def _sdmux_status(self):
+        """Internal helper method that reads mux state"""
+        return self.run_usbsdmux("get")
+
     def run_usbsdmux(self, mode):
+        """Executes the usbsdmux command with the given mode and returns its output"""
         if not self.sg_device:
             self.sg_device = self.search_sg_device()
 
-        print(f"Running: usbsdmux {self.sg_device} {mode}")
-
+        self.logger.info(f"Running: usbsdmux {self.sg_device} {mode}")
 
         cmd = f"usbsdmux {self.sg_device} {mode}"
         stream = os.popen(cmd)
@@ -184,31 +172,40 @@ class UsbSdMux(Driver):
 
     @export
     def switch_host(self):
-        print("switching sdmux to host")
+        """Switches SD-Mux to host mode"""
+        self.logger.info("Switching sdmux to host")
         return self.run_usbsdmux("host")
 
     @export
     def switch_dut(self):
-        print("switching sdmux to dut")
-        libc.umount(str(Path.home() / "sdmux").encode())
+        """Switches SD-Mux to dut mode"""
+        self.logger.info("Switching sdmux to dut")
+        try:
+            libc.umount(str(Path.home() / "sdmux").encode())
+        except OSError:
+            pass
         return self.run_usbsdmux("dut")
-    
+
     @export
     def off(self):
-        print("sdmux powering off")
+        """Powers off the SD-Mux"""
+        self.logger.info("sdmux powering off")
         return self.run_usbsdmux("off")
-    
+
     @export
     def sdmux_status(self):
-        print("getting sdmux status/info")
-        return self.run_usbsdmux("get")
+        """Returns the current SD-Mux status (host/dut/off)"""
+        self.logger.info("getting sdmux status/info")
+        return self._sdmux_status()
 
     @export
     def get_sg_device(self):
+        """Returns the /dev/sgX path of the SD-Mux device, or searches for it if not already set"""
         if not self.sg_device:
             self.sg_device = self.search_sg_device()
         return self.sg_device
 
     @classmethod
     def client(cls) -> str:
-        return "jumpstarter.driver.client.DriverClient"
+        """Jumpstarter client binding"""
+        return "jumpstarter_driver_sdmux.client.UsbSdMuxClient"
